@@ -18,9 +18,6 @@ from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.aws.aws_common import AwsConnectionConfig
 from datahub.ingestion.source.data_lake_common.config import PathSpecsConfigMixin
 from datahub.ingestion.source.data_lake_common.data_lake_utils import PLATFORM_GCS
-from datahub.ingestion.source.data_lake_common.object_store import (
-    create_object_store_adapter,
-)
 from datahub.ingestion.source.data_lake_common.path_spec import PathSpec, is_gcs_uri
 from datahub.ingestion.source.s3.config import DataLakeSourceConfig
 from datahub.ingestion.source.s3.report import DataLakeSourceReport
@@ -91,7 +88,9 @@ class GCSSource(StatefulIngestionSourceBase):
         self.config = config
         self.report = GCSSourceReport()
         self.platform: str = PLATFORM_GCS
-        self.s3_source = self.create_equivalent_s3_source(ctx)
+        self.s3_source = S3Source(
+            self.create_equivalent_s3_config(), PipelineContext(ctx.run_id)
+        )
 
     @classmethod
     def create(cls, config_dict, ctx):
@@ -102,6 +101,7 @@ class GCSSource(StatefulIngestionSourceBase):
         s3_path_specs = self.create_equivalent_s3_path_specs()
 
         s3_config = DataLakeSourceConfig(
+            platform="gcs",
             path_specs=s3_path_specs,
             aws_config=AwsConnectionConfig(
                 aws_endpoint_url="https://storage.googleapis.com",
@@ -135,32 +135,6 @@ class GCSSource(StatefulIngestionSourceBase):
             )
 
         return s3_path_specs
-
-    def create_equivalent_s3_source(self, ctx: PipelineContext) -> S3Source:
-        config = self.create_equivalent_s3_config()
-        s3_source = S3Source(config, PipelineContext(ctx.run_id))
-        return self.s3_source_overrides(s3_source)
-
-    def s3_source_overrides(self, source: S3Source) -> S3Source:
-        """
-        Override S3Source methods with GCS-specific implementations using the adapter pattern.
-
-        This method customizes the S3Source instance to behave like a GCS source by
-        applying the GCS-specific adapter that replaces the necessary functionality.
-
-        Args:
-            source: The S3Source instance to customize
-
-        Returns:
-            The modified S3Source instance with GCS behavior
-        """
-        # Create a GCS adapter with project ID and region from our config
-        adapter = create_object_store_adapter(
-            "gcs",
-        )
-
-        # Apply all customizations to the source
-        return adapter.apply_customizations(source)
 
     def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
         return [

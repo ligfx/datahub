@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import unquote
 
 import smart_open.compression as so_compression
 from more_itertools import peekable
@@ -43,7 +44,9 @@ from datahub.ingestion.source.aws.s3_util import (
 )
 from datahub.ingestion.source.data_lake_common.data_lake_utils import ContainerWUCreator
 from datahub.ingestion.source.data_lake_common.object_store import (
-    create_object_store_adapter,
+    get_abs_external_url,
+    get_gcs_external_url,
+    get_s3_external_url,
 )
 from datahub.ingestion.source.data_lake_common.path_spec import FolderTraversalMethod
 from datahub.ingestion.source.s3.config import DataLakeSourceConfig, PathSpec
@@ -209,6 +212,9 @@ class S3Source(StatefulIngestionSourceBase):
     container_WU_creator: ContainerWUCreator
     object_store_adapter: Any
 
+    _aws_region: Optional[str]
+    _platform: str
+
     def __init__(self, config: DataLakeSourceConfig, ctx: PipelineContext):
         super().__init__(config, ctx)
         self.source_config = config
@@ -237,9 +243,8 @@ class S3Source(StatefulIngestionSourceBase):
                     aws_region = "us-east-1"
 
             # Create an S3 adapter with the configured region
-            self.object_store_adapter = create_object_store_adapter(
-                "s3", aws_region=aws_region
-            )
+            self._platform = "s3"
+            self._aws_region = aws_region
 
             # Special handling for GCS via S3 (via boto compatibility layer)
             if (
@@ -249,16 +254,10 @@ class S3Source(StatefulIngestionSourceBase):
                 in self.source_config.aws_config.aws_endpoint_url.lower()
             ):
                 # We need to preserve the S3-style paths but use GCS external URL generation
-                self.object_store_adapter = create_object_store_adapter("gcs")
-                # Override create_s3_path to maintain S3 compatibility
-                self.object_store_adapter.register_customization(
-                    "create_s3_path", lambda bucket, key: f"s3://{bucket}/{key}"
-                )
+                self._platform = "gcs"
         else:
             # For local files, create a default adapter
-            self.object_store_adapter = create_object_store_adapter(
-                self.source_config.platform or "file"
-            )
+            self._platform = self.source_config.platform or "file"
 
         config_report = {
             config_option: config.dict().get(config_option)
@@ -672,8 +671,14 @@ class S3Source(StatefulIngestionSourceBase):
         Returns:
             An external URL or None if not applicable
         """
-        # The adapter handles all the URL generation with proper region handling
-        return self.object_store_adapter.get_external_url(table_data)
+
+        if self._platform == "s3":
+            return get_s3_external_url(table_data, self._aws_region)
+        elif self._platform == "gcs":
+            return get_gcs_external_url(table_data)
+        elif self._platform == "abs":
+            return get_abs_external_url(table_data)
+        return None
 
     def ingest_table(
         self, table_data: TableData, path_spec: PathSpec
@@ -1010,7 +1015,10 @@ class S3Source(StatefulIngestionSourceBase):
             )
 
     def create_s3_path(self, bucket_name: str, key: str) -> str:
-        return f"s3://{bucket_name}/{key}"
+        if self._platform == "gcs":
+            return unquote(f"gs://{bucket_name}/{key}")
+        else:
+            return f"s3://{bucket_name}/{key}"
 
     def s3_browser(self, path_spec: PathSpec, sample_size: int) -> Iterable[BrowsePath]:
         """
@@ -1469,7 +1477,7 @@ class S3Source(StatefulIngestionSourceBase):
         ]
 
     def is_s3_platform(self):
-        return self.source_config.platform == "s3"
+        return self.source_config.platform in ("s3", "gcs")
 
     def get_report(self):
         return self.report
